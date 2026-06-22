@@ -10,8 +10,9 @@ jobs:
   discover:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.discover.outputs.matrix }}
+      matrix:   ${{ steps.discover.outputs.matrix }}
       has_work: ${{ steps.discover.outputs.has_work }}
+
     steps:
       - name: Install gdown
         run: pip install gdown --break-system-packages
@@ -19,53 +20,71 @@ jobs:
       - name: Discover videos in Drive folder
         id: discover
         run: |
-          python -c "
-          import json, os, sys, time
+          python3 - << 'PYEOF'
+          import json
+          import os
+          import sys
+          import time
           from pathlib import Path
           import gdown
 
-          MLIGHT2_FOLDER = '1vXLbhQ-f4D-clk_NYxjHn6dhG7L8S7j5'
-          TMP_DIR = Path('/tmp/discover_mlight2')
+          MLIGHT2_FOLDER = "1vXLbhQ-f4D-clk_NYxjHn6dhG7L8S7j5"
+          TMP_DIR = Path("/tmp/discover")
           TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-          print('Downloading mlight2 folder to discover videos...')
-          for attempt in range(3):
+          print("Downloading folder to discover videos...")
+
+          for attempt in range(1, 4):
               try:
-                  gdown.download_folder(id=MLIGHT2_FOLDER, output=str(TMP_DIR), quiet=False)
+                  gdown.download_folder(
+                      id=MLIGHT2_FOLDER,
+                      output=str(TMP_DIR),
+                      quiet=False,
+                  )
                   break
               except Exception as e:
-                  print(f'Attempt {attempt+1} failed: {e}')
-                  if attempt == 2:
-                      print('ERROR: all retries failed', file=sys.stderr)
+                  print(f"Attempt {attempt}/3 failed: {e}")
+                  if attempt == 3:
+                      print("ERROR: All folder-download attempts failed.", file=sys.stderr)
                       sys.exit(1)
-                  time.sleep(30)
+                  wait = 30 * attempt
+                  print(f"Waiting {wait}s before retry...")
+                  time.sleep(wait)
 
-          all_videos = sorted(
-              p for p in TMP_DIR.rglob('*')
-              if p.suffix.lower() == '.mp4'
+          videos = sorted(
+              p for p in TMP_DIR.rglob("*")
+              if p.suffix.lower() == ".mp4"
           )
 
-          if not all_videos:
-              print('ERROR: no videos found in Drive folder.', file=sys.stderr)
+          if not videos:
+              print("ERROR: No .mp4 files found in Drive folder.", file=sys.stderr)
               sys.exit(1)
 
-          print(f'Found {len(all_videos)} videos:')
-          for p in all_videos:
-              print(f'  - {p.name}')
+          print(f"\nFound {len(videos)} video(s):")
+          for v in videos:
+              print(f"  {v.name}")
 
-          matrix = {'include': [{'video_name': p.name, 'video_id': ''} for p in all_videos]}
+          matrix = {
+              "include": [
+                  {"video_name": v.name, "video_id": ""}
+                  for v in videos
+              ]
+          }
 
-          github_output = os.environ.get('GITHUB_OUTPUT')
-          with open(github_output, 'a') as f:
-              f.write(f'matrix={json.dumps(matrix)}\n')
-              f.write(f'has_work=true\n')
-          "
+          gh_out = os.environ["GITHUB_OUTPUT"]
+          with open(gh_out, "a") as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+              f.write("has_work=true\n")
+
+          print("Matrix written to GITHUB_OUTPUT.")
+          PYEOF
 
   render:
     needs: discover
     if: needs.discover.outputs.has_work == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 340
+
     strategy:
       max-parallel: 1
       fail-fast: false
@@ -79,34 +98,41 @@ jobs:
         run: |
           echo "=== Disk before cleanup ==="
           df -h
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
-          sudo apt-get clean
-          docker system prune -af || true
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY" \
+            /usr/local/share/powershell \
+            /usr/share/swift \
+            || true
+          sudo apt-get clean -qq
+          docker system prune -af --volumes || true
           echo "=== Disk after cleanup ==="
           df -h
 
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg fonts-dejavu --fix-missing
+          sudo apt-get install -y --fix-missing ffmpeg fonts-dejavu
           pip install gdown --break-system-packages
-          ffmpeg -version | head -1
-          echo "All deps installed."
+          echo "ffmpeg: $(ffmpeg -version 2>&1 | head -1)"
+          echo "gdown:  $(pip show gdown | grep Version)"
 
-      - name: Run render
+      - name: Render video
         id: render
         env:
           TARGET_VIDEO_NAME: ${{ matrix.video_name }}
-          TARGET_VIDEO_ID: ${{ matrix.video_id }}
-        run: python render.py
+          TARGET_VIDEO_ID:   ${{ matrix.video_id }}
+        run: python3 render.py
 
       - name: Create release tag
         id: tag
         run: |
           TS=$(date -u +"%Y%m%d-%H%M%S")
-          SAFE_NAME=$(echo "${{ matrix.video_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g')
-          TAG="video-${TS}-${SAFE_NAME}"
+          SAFE=$(echo "${{ matrix.video_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          TAG="video-${TS}-${SAFE}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Release tag: ${TAG}"
 
@@ -116,18 +142,18 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: "${{ matrix.video_name }} — ${{ steps.render.outputs.final_size_mb }} MB"
           body: |
-            ## ✅ Rendered Video
+            ## Rendered Video
 
             | Field | Value |
             |---|---|
             | **Source video** | `${{ matrix.video_name }}` |
             | **Final size** | ${{ steps.render.outputs.final_size_mb }} MB |
-            | **Duration rendered** | ${{ steps.render.outputs.duration_seconds }} seconds |
+            | **Duration rendered** | ${{ steps.render.outputs.duration_seconds }}s |
             | **Bitrate used** | ${{ steps.render.outputs.video_bitrate_k }}k |
+            | **Stop reason** | ${{ steps.render.outputs.stop_reason }} |
             | **Workflow run** | [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
 
-            ## ⬇️ Download
-            > Click the file under **Assets** below to download your rendered video.
+            > Click the file under **Assets** below to download.
           files: ${{ steps.render.outputs.output_path }}
           fail_on_unmatched_files: true
         env:
